@@ -19,12 +19,15 @@ build/
 # --- Node / frontend ---
 node_modules/
 .vite/
-credit_scoring_pipeline/frontend/dist/
+frontend/dist/
 
 # --- Secrets: never commit a real .env, always commit the example ---
 .env
 .env.local
 !.env.example
+
+# --- Dev server logs ---
+*.log
 
 # --- Editors / OS ---
 .vscode/

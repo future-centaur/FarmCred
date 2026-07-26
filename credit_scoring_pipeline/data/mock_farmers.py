@@ -35,6 +35,7 @@ neutral band. That is different from a connector *outage*, which raises
 
 from __future__ import annotations
 
+import random
 from typing import Any, Dict, Optional
 
 #: ``{farmer_id: {"farmer": {...}, "sources": {source: payload | None}}}``
@@ -475,9 +476,116 @@ CANONICAL_DEMO_IDS = ("F001", "F002", "F003")
 GATE_DEMO_IDS = ("F004", "F005", "F006", "F007")
 
 
+#: Farmers registered live through the API (PRD s4's POST /v1/farmers), keyed
+#: the same way as MOCK_FARMERS. Populated by :func:`register_synthetic_farmer`
+#: -- never pre-seeded, so it starts empty on every process start.
+_SYNTHETIC_FARMERS: Dict[str, Dict[str, Any]] = {}
+
+
+def _lookup(farmer_id: str) -> Optional[Dict[str, Any]]:
+    return MOCK_FARMERS.get(farmer_id) or _SYNTHETIC_FARMERS.get(farmer_id)
+
+
+def register_synthetic_farmer(farmer_id: str, profile: Dict[str, Any]) -> None:
+    """Synthesize mock connector payloads for a farmer registered live via the API.
+
+    The curated ``MOCK_FARMERS`` demo set only covers seven fixed ids
+    (F001-F007). Every other farmer -- i.e. anyone who actually goes through
+    the app's own registration flow -- would otherwise get an empty payload
+    from every connector and always land on NEUTRAL_BAND everywhere, which
+    isn't a useful demo. This generates a plausible, internally-consistent
+    set of source payloads instead, seeded deterministically on ``farmer_id``
+    so repeated fetches for the same farmer are stable within this process's
+    lifetime.
+
+    KIAMIS identity/geo/crop fields intentionally echo what the farmer typed
+    at registration (a real registry lookup for a genuine person would agree
+    with itself) so the eligibility gates behave sensibly by default; only
+    the fields a registry uniquely contributes (satellite acreage, livestock,
+    subsidy history) are randomised. This function is a no-op for any
+    ``farmer_id`` already known to ``MOCK_FARMERS`` or ``_SYNTHETIC_FARMERS``.
+    """
+    if farmer_id in MOCK_FARMERS or farmer_id in _SYNTHETIC_FARMERS:
+        return
+
+    rng = random.Random(farmer_id)
+
+    land_size = profile.get("land_size_acres") or 1.5
+    satellite_verified = round(land_size * rng.uniform(0.82, 1.0), 2)
+
+    kiamis = {
+        "national_id": profile.get("national_id"),
+        "phone": profile.get("phone"),
+        "county": profile.get("county"),
+        "sub_county": None,
+        "ward": profile.get("ward"),
+        "gps_pin": {"lat": profile.get("gps_lat"), "lon": profile.get("gps_lon")},
+        "land_size_acres_self_reported": land_size,
+        "land_size_acres_satellite_verified": satellite_verified,
+        "crop": profile.get("crop"),
+        "secondary_crops": profile.get("secondary_crops") or [],
+        "livestock_units": rng.randint(0, 5),
+        "input_subsidy_history": [
+            {"season": "2025_short_rains", "programme": "NFSF", "redeemed": True}
+            for _ in range(rng.randint(0, 2))
+        ],
+    }
+
+    cooperative = None
+    if rng.random() < 0.6:
+        seasons_total = rng.randint(4, 12)
+        seasons_with = rng.randint(max(1, int(seasons_total * 0.4)), seasons_total)
+        cooperative = {
+            "cooperative_name": f"{(profile.get('ward') or 'Local').title()} Growers Cooperative",
+            "member_since": f"{rng.randint(2016, 2024)}-{rng.randint(1, 12):02d}-01",
+            "delivery_tier": rng.choice(["high", "mid", "low"]),
+            "seasons_with_delivery": seasons_with,
+            "seasons_total": seasons_total,
+            "input_loan_deductions_last_12mo": rng.randint(0, 5),
+        }
+
+    base_inflow = rng.uniform(4_000, 20_000)
+    agrovet_mpesa = {
+        "monthly_inflows_kes": [round(base_inflow * rng.uniform(0.6, 1.4)) for _ in range(12)],
+        "input_purchases_before_planting": rng.random() < 0.6,
+        "unmapped_till_transactions": rng.randint(0, 20),
+    }
+
+    has_crb_file = rng.random() < 0.7
+    negative_listings = []
+    if has_crb_file and rng.random() < 0.25:
+        negative_listings = [{"amount_kes": rng.randint(5_000, 60_000), "months_ago": rng.randint(1, 36)}]
+    crb_paygo = {
+        "has_crb_file": has_crb_file,
+        "negative_listings": negative_listings,
+        "existing_loan_balance_kes": rng.choice([0, 0, 15_000, 45_000, 90_000]) if has_crb_file else 0,
+        "paygo_tradeline": rng.choice([None, "completed", "current_good"]),
+        "sunculture_owner": rng.random() < 0.15,
+    }
+
+    climate = {
+        "regional_exposure": rng.choice(["low", "moderate", "elevated", "high"]),
+        "ndvi_anomaly": round(rng.uniform(-0.30, 0.08), 2),
+        "rainfall_deficit_pct": rng.randint(2, 45),
+        "ward": profile.get("ward"),
+        "season": "2026_long_rains",
+    }
+
+    _SYNTHETIC_FARMERS[farmer_id] = {
+        "farmer": {**profile, "farmer_id": farmer_id},
+        "sources": {
+            "kiamis": kiamis,
+            "cooperative": cooperative,
+            "agrovet_mpesa": agrovet_mpesa,
+            "crb_paygo": crb_paygo,
+            "climate": climate,
+        },
+    }
+
+
 def get_farmer(farmer_id: str) -> Optional[Dict[str, Any]]:
     """Return the Farmer record for ``farmer_id``, or ``None`` if unknown."""
-    entry = MOCK_FARMERS.get(farmer_id)
+    entry = _lookup(farmer_id)
     return dict(entry["farmer"]) if entry else None
 
 
@@ -487,7 +595,7 @@ def get_source_payload(farmer_id: str, source: str) -> Dict[str, Any]:
     Returns ``{}`` both for an unknown farmer and for a source explicitly
     mapped to ``None`` -- in connector terms, "healthy source, no record".
     """
-    entry = MOCK_FARMERS.get(farmer_id)
+    entry = _lookup(farmer_id)
     if not entry:
         return {}
     payload = entry.get("sources", {}).get(source)

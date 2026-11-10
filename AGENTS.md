@@ -1,0 +1,1 @@
+Before any exploratory debugging, search `C:\Users\user\OneDrive\Desktop\BFG\Centaur-vault\Auxiliary stocks\ledger\entries\` for the error signature. After resolving an error, write one new entry file there. Never edit an existing entry.
